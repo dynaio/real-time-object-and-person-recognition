@@ -1,0 +1,44 @@
+[
+  {
+    "timestamp": "2026-05-20T16:55:32.898569",
+    "class_counts": {
+      "person": 1
+    },
+    "recognized_ids": []
+  },
+  {
+    "timestamp": "2026-05-20T16:55:33.327984",
+    "class_counts": {
+      "person": 1
+    },
+    "recognized_ids": []
+  },
+  {
+    "timestamp": "2026-05-20T16:55:33.757926",
+    "class_counts": {
+      "person": 1
+    },
+    "recognized_ids": []
+  },
+  {
+    "timestamp": "2026-05-20T16:55:34.251552",
+    "class_counts": {
+      "person": 1
+    },
+    "recognized_ids": []
+  },
+  {
+    "timestamp": "2026-05-20T16:55:34.687233",
+    "class_counts": {
+      "person": 1
+    },
+    "recognized_ids": []
+  },
+  {
+    "timestamp": "2026-05-20T16:55:35.124426",
+    "class_counts": {
+      "person": 1
+    },
+    "recognized_ids": []
+  }
+]

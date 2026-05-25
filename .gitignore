@@ -1,19 +1,23 @@
-# Personal face data – do NOT share
-gallery.json
-person_names.json
-record_log.json
-
 # Bytecode
 __pycache__/
 *.pyc
 
-# Model zip archives (optional – if you don't want duplicates)
-*.zip
-
-# Virtual environment
-.venv/
+# Virtual environments
 venv/
+.venv/
 
 # IDE
 .vscode/
 .idea/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Data files (if any)
+*.csv
+*.tsv
+*.xlsx
+
+# OS files
+.DS_Store
+Thumbs.db
