@@ -2,7 +2,7 @@ import time
 import json
 import os
 import numpy as np
-import config
+import config as config
 from facenet import cosine_similarity
 
 # ================== Gallery persistence ==================

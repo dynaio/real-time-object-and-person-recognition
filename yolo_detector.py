@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import yaml
 from openvino import Core
-import config
+import config as config
 import os
 class YOLOOpenVINO:
     def __init__(self, model_dir=config.YOLO_MODEL_DIR, conf_thres=0.25, iou_thres=0.45):

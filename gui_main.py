@@ -1,5 +1,6 @@
 import os
 os.environ["QT_QPA_PLATFORM"] = "wayland"
+
 import sys
 import time
 import json
@@ -24,8 +25,8 @@ import config
 class CaptureWorker(QThread):
     frame_ready = pyqtSignal(QPixmap)
     stats_ready = pyqtSignal(dict)
-    track_data_ready = pyqtSignal(dict)        # aggregated class data
-    registered_list_ready = pyqtSignal(list)   # only when the list changes
+    track_data_ready = pyqtSignal(dict)
+    registered_list_ready = pyqtSignal(list)
     error = pyqtSignal(str)
 
     def __init__(self, parent=None):
@@ -37,9 +38,12 @@ class CaptureWorker(QThread):
         self.record_log = []
         self.record_frame_interval = 10
         self.person_manager = None
+        self.prev_masks = {}
+        self.track_hits = {}
+        self.fill_enabled = True
 
     def initialize(self):
-        self.yolo = YOLOOpenVINO(config.YOLO_MODEL_DIR, conf_thres=0.2, iou_thres=0.35)   # lower thresholds
+        self.yolo = YOLOOpenVINO(config.YOLO_MODEL_DIR, conf_thres=0.45, iou_thres=0.35)
         self.facenet = FaceNetOpenVINO(config.FACENET_MODEL_DIR)
         self.face_detector = OpenCVFaceDetector()
         self.tracker = Sort(max_age=30, min_hits=3, iou_threshold=0.3)
@@ -59,9 +63,8 @@ class CaptureWorker(QThread):
 
         self.running = True
         frame_count = 0
-        prev_registered = self.person_manager.total_registered   # for change detection
+        prev_registered = self.person_manager.total_registered
 
-        # Emit the initial registered list once
         self.registered_list_ready.emit(self.person_manager.get_registered_list())
 
         while self.running:
@@ -86,8 +89,9 @@ class CaptureWorker(QThread):
             dets_for_sort = np.array([d["bbox"] + [d["score"]] for d in detections]) if detections else np.empty((0,5))
             tracks = self.tracker.update(dets_for_sort)
 
-            # Map detection index to best track ID
+            # Map detection index to track ID
             det_to_track = {}
+            active_tids = set()
             for i, det in enumerate(detections):
                 best_tid = -1
                 best_iou = 0
@@ -98,6 +102,14 @@ class CaptureWorker(QThread):
                         best_tid = int(track[4])
                 if best_tid != -1 and best_iou > 0.3:
                     det_to_track[i] = best_tid
+                    active_tids.add(best_tid)
+
+            # Update track hit counters
+            for tid in active_tids:
+                self.track_hits[tid] = self.track_hits.get(tid, 0) + 1
+            for tid in list(self.track_hits.keys()):
+                if tid not in active_tids:
+                    self.track_hits[tid] = 0
 
             # Face recognition every 3 frames
             if frame_count % 3 == 0:
@@ -116,12 +128,12 @@ class CaptureWorker(QThread):
                                     emb = self.facenet.extract(face_crop)
                                     self.person_manager.update_track(det_to_track[i], emb, time.time())
 
-            # If a new person was auto-registered, emit the registered list
+            # If a new person was auto-registered, emit the list
             if self.person_manager.total_registered > prev_registered:
                 self.registered_list_ready.emit(self.person_manager.get_registered_list())
                 prev_registered = self.person_manager.total_registered
 
-            # Build aggregated class data
+            # Build aggregated class data & draw masks
             class_data = {}
             for i, det in enumerate(detections):
                 x1, y1, x2, y2 = map(int, det["bbox"])
@@ -129,7 +141,7 @@ class CaptureWorker(QThread):
                 class_id = det["class"]
                 tid = det_to_track.get(i, -1)
 
-                # Get display info
+                # Get display info (colour and text)
                 if tid != -1 and tid in self.person_manager.track_data:
                     color, text = self.person_manager.get_display_info(tid, class_id)
                 else:
@@ -139,18 +151,34 @@ class CaptureWorker(QThread):
                         label = config.COCO_NAMES[class_id] if class_id < len(config.COCO_NAMES) else f"cls_{class_id}"
                         color, text = (255, 0, 0), label
 
-                # Smooth filled mask + thin contour
-                overlay = frame.copy()
-                mask_bool = mask > 0
-                overlay[mask_bool] = color
-                frame = cv2.addWeighted(overlay, 0.35, frame, 0.65, 0)
-                contours, _ = cv2.findContours(mask_bool.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                cv2.drawContours(frame, contours, -1, color, 1)
+                # Decide whether to draw mask (stable track)
+                draw_mask = (tid != -1 and self.track_hits.get(tid, 0) >= 3)
 
+                if draw_mask:
+                    # Temporal smoothing
+                    if tid not in self.prev_masks:
+                        self.prev_masks[tid] = mask.astype(np.float32)
+                    else:
+                        alpha = 0.7
+                        self.prev_masks[tid] = cv2.addWeighted(mask.astype(np.float32), alpha,
+                                                              self.prev_masks[tid], 1 - alpha, 0)
+                    smoothed = (self.prev_masks[tid] > 0.5).astype(np.uint8)
+
+                    # Fill overlay if enabled
+                    if self.fill_enabled:
+                        overlay = frame.copy()
+                        overlay[smoothed > 0] = color
+                        frame = cv2.addWeighted(overlay, 0.35, frame, 0.65, 0)
+
+                    # Thin contour always drawn
+                    contours, _ = cv2.findContours(smoothed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    cv2.drawContours(frame, contours, -1, color, 1)
+
+                # Always show text label
                 text_y = max(y1 - 5, 15)
                 cv2.putText(frame, text, (x1, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-                # Aggregate class data
+                # Aggregate class data for GUI table
                 if class_id not in class_data:
                     class_data[class_id] = {
                         "track_ids": set(),
@@ -171,7 +199,12 @@ class CaptureWorker(QThread):
                     else:
                         class_data[class_id]["person_status"]["known"] += 1
 
+            # Cleanup old smoothed masks
             active_track_ids = set(int(t[4]) for t in tracks)
+            for old_tid in list(self.prev_masks.keys()):
+                if old_tid not in active_track_ids:
+                    del self.prev_masks[old_tid]
+
             self.person_manager.cleanup_tracks(active_track_ids)
 
             # Statistics
@@ -211,8 +244,6 @@ class CaptureWorker(QThread):
             })
             self.track_data_ready.emit(class_data)
 
-            # No longer emitting registered_list_ready periodically – only when content changes
-
             frame_count += 1
 
         self.cap.release()
@@ -235,6 +266,12 @@ class CaptureWorker(QThread):
             log_path = os.path.join(os.path.dirname(__file__), "record_log.json")
             with open(log_path, 'w') as f:
                 json.dump(self.record_log, f, indent=2)
+        self.mutex.unlock()
+
+    def set_fill_enabled(self, state):
+        """Called from GUI to toggle mask fill."""
+        self.mutex.lock()
+        self.fill_enabled = state
         self.mutex.unlock()
 
     def manual_register_track(self, track_id, name):
@@ -349,6 +386,13 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self.btn_delete_person)
         sidebar_layout.addLayout(btn_row)
 
+        # Fill toggle button
+        self.btn_fill = QPushButton("Fill ON")
+        self.btn_fill.setCheckable(True)
+        self.btn_fill.setChecked(True)
+        self.btn_fill.clicked.connect(self.toggle_fill)
+        sidebar_layout.addWidget(self.btn_fill)
+
         sidebar_layout.addStretch()
 
         # ---- Control Buttons ----
@@ -373,9 +417,7 @@ class MainWindow(QMainWindow):
         self.is_running = False
         self.fullscreen_state = False
         self.reg_table_programmatic_update = False
-
-        # Cumulative class data (persistent across frames)
-        self.cumulative_classes = {}   # class_id -> {track_ids: set, class_name: str}
+        self.cumulative_classes = {}
 
     def toggle_start(self):
         if not self.is_running:
@@ -400,6 +442,12 @@ class MainWindow(QMainWindow):
     def toggle_recording(self):
         if self.worker:
             self.worker.set_recording(self.btn_record.isChecked())
+
+    def toggle_fill(self):
+        if self.worker:
+            state = self.btn_fill.isChecked()
+            self.worker.set_fill_enabled(state)
+            self.btn_fill.setText("Fill ON" if state else "Fill OFF")
 
     def toggle_fullscreen(self):
         if not self.fullscreen_state:
@@ -434,7 +482,6 @@ class MainWindow(QMainWindow):
             self.btn_record.setText("Record")
 
     def update_track_table(self, class_data):
-        """Aggregated by class; rows persist once a class is seen."""
         for class_id, data in class_data.items():
             if class_id not in self.cumulative_classes:
                 self.cumulative_classes[class_id] = {
@@ -528,7 +575,7 @@ class MainWindow(QMainWindow):
         person_id = int(id_item.text())
         new_name = name_item.text().strip()
         if new_name:
-            self.worker.rename_person(person_id, new_name)   # this will re-emit the list (which rebuilds the table)
+            self.worker.rename_person(person_id, new_name)
 
     def on_register_clicked(self):
         if self.worker is None or not self.is_running:
@@ -562,7 +609,6 @@ class MainWindow(QMainWindow):
         person_id = int(id_item.text())
         self.worker.delete_person(person_id)
         QMessageBox.information(self, "Deleted", f"Person {person_id} removed.")
-        # worker.delete_person already emits the updated list
 
     def closeEvent(self, event):
         if self.worker:
